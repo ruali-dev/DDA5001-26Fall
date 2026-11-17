@@ -2,6 +2,8 @@
 
 Course code for DDA5001 at CUHK-Shenzhen. See the handbook and Blackboard for deadlines and submission requirements.
 
+This fork completes the seven Part I exercises and includes a [PC40 launcher](p1/PC40.md) for six sequential experiments using the installed classroom environment.
+
 | Part | Topic |
 | --- | --- |
 | [Part I](p1/README.md) | GPT pre-training: optimizers and learning rates |
