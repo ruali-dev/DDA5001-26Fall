@@ -38,4 +38,5 @@ if ! "$PYTHON" -c 'import huggingface_hub' >/dev/null 2>&1; then
         exit 1
     fi
 fi
+export PC40_BACKUP_PYTHON="$BASE_PYTHON"
 exec "$PYTHON" backup_hf.py "$@"

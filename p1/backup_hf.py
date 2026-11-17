@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import zipfile
 
@@ -147,6 +149,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", help="explicit pc40 session folder (default: newest pc40-* session)")
     parser.add_argument("--dry-run", action="store_true", help="validate and list files without authentication or hashing")
+    parser.add_argument("--compact", action="store_true", help="upload six endpoint models without optimizer/RNG state or best checkpoints")
     args = parser.parse_args()
     session = select_session(args.run_dir)
     files = validate_session(session)
@@ -156,8 +159,11 @@ def main():
         for path in files:
             print(f"{path.relative_to(session).as_posix()}\t{path.stat().st_size}")
         return 0
-    total = sum(path.stat().st_size for path in files)
-    print(f"Validated {session.name}: {len(files)} files, {total / (1024 ** 3):.2f} GiB", flush=True)
+    if args.compact:
+        print(f"Validated {session.name}: compact backup will keep six endpoint models and experiment records.", flush=True)
+    else:
+        total = sum(path.stat().st_size for path in files)
+        print(f"Validated {session.name}: {len(files)} files, {total / (1024 ** 3):.2f} GiB", flush=True)
 
     try:
         from huggingface_hub import HfApi
@@ -184,17 +190,39 @@ def main():
                     repo_id=REPO_ID, repo_type="model", commit_message=f"Back up {session_name} archive")
     archive_manifest, _ = local_manifest([zip_path], session)
     remote_verify(api, session_name, archive_manifest["files"])
-    print("Archive uploaded and verified. Now hashing checkpoints for integrity verification.", flush=True)
-    manifest, _ = local_manifest(files, session)
-    allowed = [path.relative_to(session).as_posix() for path in files]
+    print("Archive uploaded and verified.", flush=True)
+    upload_dir = session
+    if args.compact:
+        upload_dir = ROOT / ".cache" / "hf-backup" / "compact" / session.name
+        course_python = os.environ.get("PC40_BACKUP_PYTHON", sys.executable)
+        print("Extracting endpoint models on CPU; original files and tensor precision are preserved.", flush=True)
+        subprocess.run([course_python, str(ROOT / "compact_checkpoints.py"),
+                        "--session", str(session), "--output", str(upload_dir)], check=True)
+        compact_files = []
+        for source in files:
+            if source.suffix == ".pt":
+                continue
+            destination = upload_dir / source.relative_to(session)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            compact_files.append(destination)
+        compact_files.extend(upload_dir / run / "last.pt" for run in EXPECTED)
+        files = sorted(compact_files)
+        session_name += "/compact"
+    print("Hashing selected backup files for integrity verification.", flush=True)
+    manifest, total = local_manifest(files, upload_dir)
+    manifest["source_session"] = session.name
+    manifest["artifact_kind"] = "endpoint-model-only" if args.compact else "full-training-checkpoint"
+    print(f"Selected upload: {len(files)} files, {total / (1024 ** 3):.2f} GiB", flush=True)
+    allowed = [path.relative_to(upload_dir).as_posix() for path in files]
     print(f"Uploading {len(files)} allowlisted files; Hub transfer uses Xet/resume where available.", flush=True)
-    api.upload_folder(folder_path=str(session), path_in_repo=session_name, repo_id=REPO_ID,
+    api.upload_folder(folder_path=str(upload_dir), path_in_repo=session_name, repo_id=REPO_ID,
                       repo_type="model", allow_patterns=allowed,
                       commit_message=f"Back up {session_name} experiment files")
 
     cache = ROOT / ".cache" / "hf-backup"
     cache.mkdir(parents=True, exist_ok=True)
-    manifest_path = cache / f"{session_name}-manifest.json"
+    manifest_path = cache / f"{session.name}-{'compact' if args.compact else 'full'}-manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     manifest_entry = {"path": "manifest.json", "size": manifest_path.stat().st_size,
                       "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
